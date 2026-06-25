@@ -132,6 +132,8 @@ async function ensureIndexes() {
   ])
 }
 
+
+
 async function updateAuthUserRole(userEmail, role) {
   return getAuthCollection('user').findOneAndUpdate(
     { email: userEmail },
@@ -145,14 +147,6 @@ async function updateAuthUserRole(userEmail, role) {
   )
 }
 
-app.get('/', async (req, res) => {
-  try {
-    await client.db('admin').command({ ping: 1 })
-    res.send(`Forge Pulse server is running. MongoDB database "${dbName}" is healthy.`)
-  } catch (err) {
-    console.error('MongoDB ping failed:', err)
-    res.status(500).send('MongoDB connection failed.')
-  }
-})
+
 
 
