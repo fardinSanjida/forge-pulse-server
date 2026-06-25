@@ -98,4 +98,38 @@ function authorizeRole(allowed) {
   };
 }
 
+async function ensureIndexes() {
+  await Promise.all([
+    getAuthCollection('user').createIndex({ email: 1 }),
+    getCollection('classes').createIndexes([
+      { key: { status: 1 } },
+      { key: { category: 1 } },
+      { key: { name: 1 } },
+    ]),
+    getCollection('trainerApplications').createIndexes([
+      { key: { userEmail: 1 }, unique: true },
+      { key: { status: 1 } },
+    ]),
+    getCollection('bookings').createIndexes([
+      { key: { userEmail: 1, classId: 1 }, unique: true },
+      { key: { userEmail: 1 } },
+    ]),
+    getCollection('favorites').createIndexes([
+      { key: { userEmail: 1, classId: 1 }, unique: true },
+      { key: { userEmail: 1 } },
+    ]),
+    getCollection('forumPosts').createIndexes([
+      { key: { createdAt: -1 } },
+      { key: { authorEmail: 1 } },
+    ]),
+    getCollection('forumComments').createIndexes([
+      { key: { postId: 1, createdAt: -1 } },
+      { key: { authorEmail: 1 } },
+    ]),
+    getCollection('forumVotes').createIndexes([
+      { key: { postId: 1, userEmail: 1 }, unique: true },
+    ]),
+  ])
+}
+
 
