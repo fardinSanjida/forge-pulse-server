@@ -87,5 +87,15 @@ function authenticateJWT(req, res, next) {
   }
 }
 
+function authorizeRole(allowed) {
+  const allowedRoles = Array.isArray(allowed) ? allowed : [allowed];
+  return (req, res, next) => {
+    const role = req.user?.role || 'user';
+    if (!allowedRoles.includes(role)) {
+      return res.status(403).json({ error: 'Insufficient privileges' });
+    }
+    return next();
+  };
+}
 
 
