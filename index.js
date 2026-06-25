@@ -20,3 +20,21 @@ const uri = process.env.MONGO_DB_URI
 const dbName = process.env.MONGO_DB_NAME || 'forge_pulse_db'
 const authDbName = process.env.AUTH_DB_NAME || dbName
 
+if (!uri) {
+  console.error('Missing MONGO_DB_URI in .env')
+  process.exit(1)
+}
+
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+})
+
+const getDb = () => client.db(dbName)
+const getAuthDb = () => client.db(authDbName)
+const getCollection = (name) => getDb().collection(name)
+const getAuthCollection = (name) => getAuthDb().collection(name)
+
