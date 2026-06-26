@@ -1,4 +1,4 @@
-require('dotenv').config()
+ require('dotenv').config()
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId, ServerApiVersion } = require('mongodb');
@@ -50,19 +50,6 @@ function getPagination(query) {
     limit,
     skip: (page - 1) * limit,
   }
-}
-function generateToken(user) {
-  const payload = {
-    email: user.email,
-    role: user.role || 'user',
-  };
-
-  const secret = process.env.JWT_SECRET;
-  if (!secret) {
-    throw new Error('Missing JWT_SECRET in environment');
-  }
-
-  return jwt.sign(payload, secret, { expiresIn: '7d' });
 }
 
 async function createBookingFromStripeSession(session) {
@@ -117,7 +104,7 @@ function generateToken(user) {
   return jwt.sign(payload, secret, { expiresIn: '7d' });
 }
 
-function authenticateJWT(req, res, next) {
+async function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization || req.headers.Authorization;
   let token = null;
 
@@ -130,13 +117,29 @@ function authenticateJWT(req, res, next) {
   if (!token) {
     return res.status(401).json({ error: 'Authorization token required' });
   }
+
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    return next();
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
   } catch (err) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+
+  // Re-fetch live role and banned status so admin changes take effect immediately
+  // without requiring the user to re-login.
+  try {
+    const dbUser = await getAuthCollection('user').findOne(
+      { email: req.user.email },
+      { projection: { role: 1, banned: 1 } },
+    )
+    if (dbUser) {
+      req.user.role = dbUser.role || 'user'
+      req.user.banned = dbUser.banned ?? false
+    }
+  } catch {
+    // DB error: fall back to values in the JWT
+  }
+
+  return next();
 }
 
 function authorizeRole(allowed) {
@@ -148,6 +151,21 @@ function authorizeRole(allowed) {
     }
     return next();
   };
+}
+
+async function checkNotBlocked(req, res, next) {
+  const userEmail = req.user?.email;
+  if (!userEmail) return next();
+  try {
+    const user = await getAuthCollection('user').findOne({ email: userEmail });
+    if (user?.banned) {
+      return res.status(403).json({ error: 'Action restricted by Admin' });
+    }
+    return next();
+  } catch (err) {
+    console.error('Failed to check user block status:', err);
+    return next();
+  }
 }
 
 async function ensureIndexes() {
@@ -184,22 +202,6 @@ async function ensureIndexes() {
   ])
 }
 
-async function checkNotBlocked(req, res, next) {
-  const userEmail = req.user?.email;
-  if (!userEmail) return next();
-  try {
-    const user = await getAuthCollection('user').findOne({ email: userEmail });
-    if (user?.banned) {
-      return res.status(403).json({ error: 'Action restricted by Admin' });
-    }
-    return next();
-  } catch (err) {
-    console.error('Failed to check user block status:', err);
-    return next();
-  }
-}
-
-
 async function updateAuthUserRole(userEmail, role) {
   return getAuthCollection('user').findOneAndUpdate(
     { email: userEmail },
@@ -212,6 +214,16 @@ async function updateAuthUserRole(userEmail, role) {
     { returnDocument: 'after' },
   )
 }
+
+app.get('/', async (req, res) => {
+  try {
+    await client.db('admin').command({ ping: 1 })
+    res.send(`Forge Pulse server is running. MongoDB database "${dbName}" is healthy.`)
+  } catch (err) {
+    console.error('MongoDB ping failed:', err)
+    res.status(500).send('MongoDB connection failed.')
+  }
+})
 
 // Issue JWT for an existing auth user (requires AUTH_ISSUE_KEY when set)
 app.post('/api/auth/issue', async (req, res) => {
@@ -249,7 +261,6 @@ app.post('/api/auth/issue', async (req, res) => {
     res.status(500).json({ error: 'Failed to issue token' });
   }
 });
-
 
 // Issue JWT and set as HttpOnly cookie (for browser login flows)
 app.post('/api/auth/issue-cookie', async (req, res) => {
@@ -723,6 +734,7 @@ app.post('/api/bookings', authenticateJWT, checkNotBlocked, async (req, res) => 
   }
 })
 
+// Create Stripe Checkout Session
 app.post('/api/create-checkout-session', authenticateJWT, async (req, res) => {
   if (!stripe) {
     return res.status(500).json({ error: 'Stripe not configured on server' });
@@ -812,6 +824,114 @@ app.post('/api/complete-checkout', authenticateJWT, async (req, res) => {
     res.status(500).json({ error: 'Failed to complete checkout' });
   }
 });
+
+app.post('/api/webhook', async (req, res) => {
+  if (!stripe) {
+    return res.status(500).send('Stripe not configured');
+  }
+
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error('Missing STRIPE_WEBHOOK_SECRET in environment');
+    return res.status(500).send('Webhook secret not configured');
+  }
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (err) {
+    console.error('Stripe webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    try {
+      if (session.payment_status === 'paid') {
+        await createBookingFromStripeSession(session);
+      }
+    } catch (err) {
+      console.error('Failed to create booking from webhook session:', err);
+      return res.status(500).send('Webhook processing error');
+    }
+  }
+
+  res.json({ received: true });
+});
+
+app.get('/api/favorites', authenticateJWT, async (req, res) => {
+  try {
+    const filter = {}
+
+    if (req.query.userEmail) {
+      filter.userEmail = String(req.query.userEmail).toLowerCase()
+    }
+
+    const favorites = await getCollection('favorites')
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(favorites)
+  } catch (err) {
+    console.error('Failed to fetch favorites:', err)
+    res.status(500).json({ error: 'Failed to fetch favorites' })
+  }
+})
+
+app.post('/api/favorites', authenticateJWT, async (req, res) => {
+  try {
+    const data = req.body
+    const userEmail = data?.userEmail?.toLowerCase()
+
+    if (!userEmail || !data?.classId) {
+      return res.status(400).json({ error: 'User email and class id are required' })
+    }
+
+    const favorite = {
+      userEmail,
+      classId: data.classId,
+      className: data.className || '',
+      trainerName: data.trainerName || '',
+      price: data.price || '',
+      schedule: data.schedule || '',
+      createdAt: new Date(),
+    }
+
+    const result = await getCollection('favorites').insertOne(favorite)
+    res.status(201).json({ ...favorite, _id: result.insertedId })
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'Class already saved to favorites' })
+    }
+
+    console.error('Failed to save favorite:', err)
+    res.status(500).json({ error: 'Failed to save favorite' })
+  }
+})
+
+app.delete('/api/favorites/:id', authenticateJWT, async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid favorite id' })
+    }
+
+    const result = await getCollection('favorites').deleteOne({ _id: objectId })
+
+    if (!result.deletedCount) {
+      return res.status(404).json({ error: 'Favorite not found' })
+    }
+
+    res.json({ deleted: true })
+  } catch (err) {
+    console.error('Failed to delete favorite:', err)
+    res.status(500).json({ error: 'Failed to delete favorite' })
+  }
+})
 
 app.get('/api/forum-posts', async (req, res) => {
   try {
@@ -1097,9 +1217,136 @@ app.post('/api/forum-posts/:id/vote', async (req, res) => {
   }
 })
 
+app.get('/api/admin/stats', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const [totalUsers, totalClasses, totalBookings] = await Promise.all([
+      getAuthCollection('user').countDocuments({}),
+      getCollection('classes').countDocuments({}),
+      getCollection('bookings').countDocuments({}),
+    ])
+    res.json({ totalUsers, totalClasses, totalBookings })
+  } catch (err) {
+    console.error('Failed to fetch admin stats:', err)
+    res.status(500).json({ error: 'Failed to fetch admin stats' })
+  }
+})
 
+app.get('/api/users', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query)
+    const filter = {}
 
+    if (req.query.role) {
+      filter.role = req.query.role
+    }
 
+    if (req.query.search) {
+      filter.$or = [
+        { name: { $regex: req.query.search, $options: 'i' } },
+        { email: { $regex: req.query.search, $options: 'i' } },
+      ]
+    }
 
+    const usersCollection = getAuthCollection('user')
+    const [users, total] = await Promise.all([
+      usersCollection
+        .find(filter, { projection: { hashedPassword: 0, password: 0 } })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      usersCollection.countDocuments(filter),
+    ])
 
+    res.json({
+      data: users,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    })
+  } catch (err) {
+    console.error('Failed to fetch users:', err)
+    res.status(500).json({ error: 'Failed to fetch users' })
+  }
+})
 
+app.patch('/api/users/:id/role', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const allowedRoles = ['admin', 'trainer', 'user']
+
+    if (!allowedRoles.includes(req.body?.role)) {
+      return res.status(400).json({ error: 'Invalid role' })
+    }
+
+    const objectId = toObjectId(req.params.id)
+    const filter = objectId ? { _id: objectId } : { _id: req.params.id }
+
+    const result = await getAuthCollection('user').findOneAndUpdate(
+      filter,
+      { $set: { role: req.body.role, updatedAt: new Date() } },
+      { returnDocument: 'after', projection: { hashedPassword: 0, password: 0 } },
+    )
+
+    if (!result) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update user role:', err)
+    res.status(500).json({ error: 'Failed to update user role' })
+  }
+})
+
+app.patch('/api/users/:id/status', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    if (typeof req.body?.banned !== 'boolean') {
+      return res.status(400).json({ error: 'banned must be a boolean' })
+    }
+
+    const objectId = toObjectId(req.params.id)
+    const filter = objectId ? { _id: objectId } : { _id: req.params.id }
+
+    const result = await getAuthCollection('user').findOneAndUpdate(
+      filter,
+      { $set: { banned: req.body.banned, updatedAt: new Date() } },
+      { returnDocument: 'after', projection: { hashedPassword: 0, password: 0 } },
+    )
+
+    if (!result) {
+      return res.status(404).json({ error: 'User not found' })
+    }
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update user status:', err)
+    res.status(500).json({ error: 'Failed to update user status' })
+  }
+})
+
+async function startServer() {
+  try {
+    await client.connect()
+    await client.db('admin').command({ ping: 1 })
+    await ensureIndexes()
+    console.log(`Connected to MongoDB database "${dbName}".`)
+
+    app.listen(port, () => {
+      console.log(`Forge Pulse server listening on port ${port}`)
+    })
+  } catch (error) {
+    console.error('Failed to connect to MongoDB:', error)
+    process.exit(1)
+  }
+}
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('token', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    path: '/',
+  });
+
+  return res.json({ success: true });
+});
+
+startServer()
