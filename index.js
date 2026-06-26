@@ -590,6 +590,87 @@ app.patch('/api/trainer-applications/:id', authenticateJWT, authorizeRole('admin
   }
 })
 
+app.get('/api/bookings', authenticateJWT, async (req, res) => {
+  try {
+    const filter = {}
+
+    if (req.query.userEmail) {
+      filter.userEmail = String(req.query.userEmail).toLowerCase()
+    }
+
+    if (req.query.classId) {
+      filter.classId = req.query.classId
+    }
+
+    if (req.query.page || req.query.limit) {
+      const { page, limit, skip } = getPagination(req.query)
+      const bookingsCollection = getCollection('bookings')
+      const [bookings, total] = await Promise.all([
+        bookingsCollection.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).toArray(),
+        bookingsCollection.countDocuments(filter),
+      ])
+      return res.json({
+        data: bookings,
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      })
+    }
+
+    const bookings = await getCollection('bookings')
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(bookings)
+  } catch (err) {
+    console.error('Failed to fetch bookings:', err)
+    res.status(500).json({ error: 'Failed to fetch bookings' })
+  }
+})
+
+app.post('/api/bookings', authenticateJWT, checkNotBlocked, async (req, res) => {
+  try {
+    const data = req.body
+    const userEmail = data?.userEmail?.toLowerCase()
+
+    if (!userEmail || !data?.classId || !data?.transactionId) {
+      return res.status(400).json({
+        error: 'User email, class id, and transaction id are required',
+      })
+    }
+
+    const now = new Date()
+    const booking = {
+      userName: data.userName || '',
+      userEmail,
+      classId: data.classId,
+      className: data.className || '',
+      trainerName: data.trainerName || '',
+      schedule: data.schedule || '',
+      amount: Number(data.amount) || 0,
+      transactionId: data.transactionId,
+      createdAt: now,
+    }
+
+    const result = await getCollection('bookings').insertOne(booking)
+
+    if (ObjectId.isValid(data.classId)) {
+      await getCollection('classes').updateOne(
+        { _id: new ObjectId(data.classId) },
+        { $inc: { bookingCount: 1 }, $set: { updatedAt: now } },
+      )
+    }
+
+    res.status(201).json({ ...booking, _id: result.insertedId })
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'You have already booked this class' })
+    }
+
+    console.error('Failed to save booking:', err)
+    res.status(500).json({ error: 'Failed to save booking' })
+  }
+})
+
 
 
 
