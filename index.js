@@ -132,6 +132,20 @@ async function ensureIndexes() {
   ])
 }
 
+async function checkNotBlocked(req, res, next) {
+  const userEmail = req.user?.email;
+  if (!userEmail) return next();
+  try {
+    const user = await getAuthCollection('user').findOne({ email: userEmail });
+    if (user?.banned) {
+      return res.status(403).json({ error: 'Action restricted by Admin' });
+    }
+    return next();
+  } catch (err) {
+    console.error('Failed to check user block status:', err);
+    return next();
+  }
+}
 
 
 async function updateAuthUserRole(userEmail, role) {
