@@ -294,7 +294,7 @@ app.post('/api/auth/issue', async (req, res) => {
 });
 
 // Issue JWT and set as HttpOnly cookie (for browser login flows)
-app.post('/api/auth/issue-cookie', async (req, res) => {
+app.post('/api/user-token', async (req, res) => {
   try {
     const { email, issueKey } = req.body || {};
 
@@ -1369,7 +1369,7 @@ async function startServer() {
   }
 }
 
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/logout', (req, res) => {
   res.clearCookie('token', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
