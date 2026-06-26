@@ -161,6 +161,44 @@ async function updateAuthUserRole(userEmail, role) {
   )
 }
 
+// Issue JWT for an existing auth user (requires AUTH_ISSUE_KEY when set)
+app.post('/api/auth/issue', async (req, res) => {
+  try {
+    const { email, issueKey } = req.body || {};
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    if (process.env.AUTH_ISSUE_KEY && issueKey !== process.env.AUTH_ISSUE_KEY) {
+      return res.status(403).json({ error: 'Invalid issue key' });
+    }
+
+    const userEmail = String(email).toLowerCase();
+    let user = await getAuthCollection('user').findOne({ email: userEmail });
+
+    if (!user) {
+      return res.status(404).json({ error: 'Auth user not found' });
+    }
+
+    // Ensure role field is persisted — Better Auth does not set it by default
+    if (!user.role) {
+      user = await getAuthCollection('user').findOneAndUpdate(
+        { email: userEmail },
+        { $set: { role: 'user' } },
+        { returnDocument: 'after' },
+      ) || user
+    }
+
+    const token = generateToken(user);
+    res.json({ token });
+  } catch (err) {
+    console.error('Failed to issue token:', err);
+    res.status(500).json({ error: 'Failed to issue token' });
+  }
+});
+
+
 // Issue JWT and set as HttpOnly cookie (for browser login flows)
 app.post('/api/auth/issue-cookie', async (req, res) => {
   try {
@@ -263,6 +301,169 @@ app.get('/api/classes', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch classes' })
   }
 })
+
+app.get('/api/classes/:id', async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid class id' })
+    }
+
+    const classItem = await getCollection('classes').findOne({ _id: objectId })
+
+    if (!classItem) {
+      return res.status(404).json({ error: 'Class not found' })
+    }
+
+    res.json(classItem)
+  } catch (err) {
+    console.error('Failed to fetch class:', err)
+    res.status(500).json({ error: 'Failed to fetch class' })
+  }
+})
+
+app.post('/api/classes', authenticateJWT, authorizeRole(['trainer','admin']), async (req, res) => {
+  try {
+    const data = req.body
+
+    if (!data?.name || !data?.category || !data?.price || !data?.description) {
+      return res.status(400).json({
+        error: 'Class name, category, price, and description are required',
+      })
+    }
+
+    const now = new Date()
+    const classDocument = {
+      name: data.name,
+      image: data.image || '',
+      category: data.category,
+      difficulty: data.difficulty || 'Beginner',
+      duration: data.duration || '',
+      schedule: data.schedule || '',
+      price: Number(data.price),
+      description: data.description,
+      trainerName: data.trainerName || '',
+      trainerEmail: data.trainerEmail || '',
+      status: 'Pending',
+      bookingCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    const result = await getCollection('classes').insertOne(classDocument)
+    res.status(201).json({ ...classDocument, _id: result.insertedId })
+  } catch (err) {
+    console.error('Failed to insert class:', err)
+    res.status(500).json({ error: 'Failed to insert class' })
+  }
+})
+
+app.patch('/api/classes/:id/status', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+    const allowedStatuses = ['Pending', 'Approved', 'Rejected']
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid class id' })
+    }
+
+    if (!allowedStatuses.includes(req.body?.status)) {
+      return res.status(400).json({ error: 'Invalid class status' })
+    }
+
+    const result = await getCollection('classes').findOneAndUpdate(
+      { _id: objectId },
+      {
+        $set: {
+          status: req.body.status,
+          rejectionReason: req.body.feedback || '',
+          updatedAt: new Date(),
+        },
+      },
+      { returnDocument: 'after' },
+    )
+
+    if (!result) {
+      return res.status(404).json({ error: 'Class not found' })
+    }
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update class status:', err)
+    res.status(500).json({ error: 'Failed to update class status' })
+  }
+})
+
+app.patch('/api/classes/:id', authenticateJWT, authorizeRole(['trainer', 'admin']), async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid class id' })
+    }
+
+    const existingClass = await getCollection('classes').findOne({ _id: objectId })
+
+    if (!existingClass) {
+      return res.status(404).json({ error: 'Class not found' })
+    }
+
+    if (req.user.role === 'trainer' && existingClass.trainerEmail !== req.user.email) {
+      return res.status(403).json({ error: 'You can only update your own classes' })
+    }
+
+    const data = req.body
+    const updates = { updatedAt: new Date() }
+
+    if (data.name !== undefined) updates.name = data.name
+    if (data.image !== undefined) updates.image = data.image
+    if (data.category !== undefined) updates.category = data.category
+    if (data.difficulty !== undefined) updates.difficulty = data.difficulty
+    if (data.duration !== undefined) updates.duration = data.duration
+    if (data.schedule !== undefined) updates.schedule = data.schedule
+    if (data.price !== undefined) updates.price = Number(data.price)
+    if (data.description !== undefined) updates.description = data.description
+
+    const result = await getCollection('classes').findOneAndUpdate(
+      { _id: objectId },
+      { $set: updates },
+      { returnDocument: 'after' },
+    )
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update class:', err)
+    res.status(500).json({ error: 'Failed to update class' })
+  }
+})
+
+app.delete('/api/classes/:id', authenticateJWT, authorizeRole(['trainer', 'admin']), async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid class id' })
+    }
+
+    const existingClass = await getCollection('classes').findOne({ _id: objectId })
+
+    if (!existingClass) {
+      return res.status(404).json({ error: 'Class not found' })
+    }
+
+    if (req.user.role === 'trainer' && existingClass.trainerEmail !== req.user.email) {
+      return res.status(403).json({ error: 'You can only delete your own classes' })
+    }
+
+    await getCollection('classes').deleteOne({ _id: objectId })
+    res.json({ deleted: true })
+  } catch (err) {
+    console.error('Failed to delete class:', err)
+    res.status(500).json({ error: 'Failed to delete class' })
+  }
+})
+
 
 
 
