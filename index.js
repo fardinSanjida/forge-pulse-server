@@ -464,6 +464,131 @@ app.delete('/api/classes/:id', authenticateJWT, authorizeRole(['trainer', 'admin
   }
 })
 
+app.get('/api/trainer-applications', async (req, res) => {
+  try {
+    const filter = {}
+
+    if (req.query.status) {
+      filter.status = req.query.status
+    }
+
+    if (req.query.userEmail) {
+      filter.userEmail = String(req.query.userEmail).toLowerCase()
+    }
+
+    const applications = await getCollection('trainerApplications')
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(applications)
+  } catch (err) {
+    console.error('Failed to fetch trainer applications:', err)
+    res.status(500).json({ error: 'Failed to fetch trainer applications' })
+  }
+})
+
+app.post('/api/trainer-applications', authenticateJWT, checkNotBlocked, async (req, res) => {
+  try {
+    const data = req.body
+    const userEmail = data?.userEmail?.toLowerCase()
+
+    if (!userEmail || !data?.experience || !data?.specialty) {
+      return res.status(400).json({
+        error: 'User email, experience, and specialty are required',
+      })
+    }
+
+    const now = new Date()
+    const application = {
+      userName: data.userName || '',
+      userEmail,
+      experience: Number(data.experience),
+      specialty: data.specialty,
+      bio: data.bio || '',
+      availableDays: Array.isArray(data.availableDays) ? data.availableDays : [],
+      status: 'Pending',
+      feedback: '',
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    const result = await getCollection('trainerApplications').findOneAndUpdate(
+      { userEmail },
+      { $setOnInsert: application },
+      { upsert: true, returnDocument: 'after' },
+    )
+
+    res.status(result.createdAt?.getTime() === now.getTime() ? 201 : 200).json(result)
+  } catch (err) {
+    console.error('Failed to save trainer application:', err)
+    res.status(500).json({ error: 'Failed to save trainer application' })
+  }
+})
+
+app.patch('/api/trainer-applications/:id', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+    const allowedStatuses = ['Pending', 'Approved', 'Rejected']
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid application id' })
+    }
+
+    if (!allowedStatuses.includes(req.body?.status)) {
+      return res.status(400).json({ error: 'Invalid application status' })
+    }
+
+    const existingApplication = await getCollection('trainerApplications').findOne({
+      _id: objectId,
+    })
+
+    if (!existingApplication) {
+      return res.status(404).json({ error: 'Application not found' })
+    }
+
+    if (req.body.status === 'Approved') {
+      const updatedUser = await updateAuthUserRole(
+        existingApplication.userEmail,
+        'trainer',
+      )
+
+      if (!updatedUser) {
+        return res.status(404).json({
+          error: 'Application found, but matching auth user was not found',
+        })
+      }
+    }
+
+    if (
+      req.body.status === 'Rejected' &&
+      existingApplication.status !== 'Approved'
+    ) {
+      await updateAuthUserRole(existingApplication.userEmail, 'user')
+    }
+
+    const result = await getCollection('trainerApplications').findOneAndUpdate(
+      { _id: objectId },
+      {
+        $set: {
+          status: req.body.status,
+          feedback: req.body.feedback || '',
+          updatedAt: new Date(),
+        },
+      },
+      { returnDocument: 'after' },
+    )
+
+    if (!result) {
+      return res.status(404).json({ error: 'Application not found' })
+    }
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update trainer application:', err)
+    res.status(500).json({ error: 'Failed to update trainer application' })
+  }
+})
 
 
 
