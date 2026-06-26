@@ -161,6 +161,111 @@ async function updateAuthUserRole(userEmail, role) {
   )
 }
 
+// Issue JWT and set as HttpOnly cookie (for browser login flows)
+app.post('/api/auth/issue-cookie', async (req, res) => {
+  try {
+    const { email, issueKey } = req.body || {};
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    if (process.env.AUTH_ISSUE_KEY && issueKey !== process.env.AUTH_ISSUE_KEY) {
+      return res.status(403).json({ error: 'Invalid issue key' });
+    }
+
+    const userEmail = String(email).toLowerCase();
+    let user = await getAuthCollection('user').findOne({ email: userEmail });
+
+    if (!user) {
+      return res.status(404).json({ error: 'Auth user not found' });
+    }
+
+    // Honour caller's requested role for new users; existing roles are preserved
+    if (!user.role) {
+      const requested = req.body.role;
+      const roleToSet = requested === 'trainer' ? 'trainer' : 'user';
+      user = await getAuthCollection('user').findOneAndUpdate(
+        { email: userEmail },
+        { $set: { role: roleToSet } },
+        { returnDocument: 'after' },
+      ) || user
+    }
+
+    const token = generateToken(user);
+
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    };
+
+    res.cookie('token', token, cookieOptions);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to issue cookie token:', err);
+    res.status(500).json({ error: 'Failed to issue cookie token' });
+  }
+});
+
+// API: list classes
+app.get('/api/classes', async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query)
+    const filter = {}
+
+    if (req.query.status) {
+      filter.status = req.query.status
+    }
+
+    if (req.query.search) {
+      filter.name = { $regex: req.query.search, $options: 'i' }
+    }
+
+    if (req.query.category) {
+      const categories = String(req.query.category)
+        .split(',')
+        .map((category) => category.trim())
+        .filter(Boolean)
+
+      if (categories.length) {
+        filter.category = { $in: categories }
+      }
+    }
+
+    if (req.query.trainerEmail) {
+      filter.trainerEmail = String(req.query.trainerEmail).toLowerCase()
+    }
+
+    const classesCollection = getCollection('classes')
+    const [classes, total] = await Promise.all([
+      classesCollection
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      classesCollection.countDocuments(filter),
+    ])
+
+    res.json({
+      data: classes,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    })
+  } catch (err) {
+    console.error('Failed to fetch classes:', err)
+    res.status(500).json({ error: 'Failed to fetch classes' })
+  }
+})
+
+
+
 
 
 
