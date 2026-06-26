@@ -1,4 +1,4 @@
- require('dotenv').config()
+require('dotenv').config()
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ObjectId, ServerApiVersion } = require('mongodb');
@@ -51,6 +51,37 @@ function getPagination(query) {
     skip: (page - 1) * limit,
   }
 }
+
+// Lazy MongoDB connection — safe for both serverless (Vercel) and long-running processes
+let _dbConnected = false;
+let _dbConnecting = null;
+
+function ensureDbConnected() {
+  if (_dbConnected) return Promise.resolve();
+  if (_dbConnecting) return _dbConnecting;
+  _dbConnecting = client.connect()
+    .then(() => client.db('admin').command({ ping: 1 }))
+    .then(() => ensureIndexes())
+    .then(() => {
+      _dbConnected = true;
+      console.log(`Connected to MongoDB database "${dbName}".`);
+    })
+    .catch((err) => {
+      _dbConnecting = null;
+      throw err;
+    });
+  return _dbConnecting;
+}
+
+app.use(async (req, res, next) => {
+  try {
+    await ensureDbConnected();
+    next();
+  } catch (err) {
+    console.error('DB connection failed:', err);
+    res.status(500).json({ error: 'Database connection failed' });
+  }
+});
 
 async function createBookingFromStripeSession(session) {
   const metadata = session.metadata || {};
@@ -1349,4 +1380,20 @@ app.post('/api/auth/logout', (req, res) => {
   return res.json({ success: true });
 });
 
-startServer()
+// Export for Vercel serverless
+module.exports = app;
+
+// In local dev, connect and listen as usual
+if (process.env.NODE_ENV !== 'production') {
+  ensureDbConnected()
+    .then(() => {
+      app.listen(port, () => {
+        console.log(`Forge Pulse server listening on port ${port}`);
+      });
+    })
+    .catch((err) => {
+      console.error('Failed to start server:', err);
+      process.exit(1);
+    });
+}
+
