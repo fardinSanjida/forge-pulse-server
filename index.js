@@ -813,6 +813,289 @@ app.post('/api/complete-checkout', authenticateJWT, async (req, res) => {
   }
 });
 
+app.get('/api/forum-posts', async (req, res) => {
+  try {
+    const { page, limit, skip } = getPagination(req.query)
+    const filter = {}
+
+    if (req.query.authorEmail) {
+      filter.authorEmail = String(req.query.authorEmail).toLowerCase()
+    }
+
+    const postsCollection = getCollection('forumPosts')
+    const [posts, total] = await Promise.all([
+      postsCollection
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .toArray(),
+      postsCollection.countDocuments(filter),
+    ])
+
+    res.json({
+      data: posts,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    })
+  } catch (err) {
+    console.error('Failed to fetch forum posts:', err)
+    res.status(500).json({ error: 'Failed to fetch forum posts' })
+  }
+})
+
+app.get('/api/forum-posts/:id', async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid post id' })
+    }
+
+    const post = await getCollection('forumPosts').findOne({ _id: objectId })
+
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' })
+    }
+
+    res.json(post)
+  } catch (err) {
+    console.error('Failed to fetch forum post:', err)
+    res.status(500).json({ error: 'Failed to fetch forum post' })
+  }
+})
+
+app.post('/api/forum-posts', authenticateJWT, authorizeRole(['trainer','admin']), async (req, res) => {
+  try {
+    const data = req.body
+
+    if (!data?.title || !data?.description || !data?.authorEmail) {
+      return res.status(400).json({
+        error: 'Title, description, and author email are required',
+      })
+    }
+
+    const now = new Date()
+    const post = {
+      title: data.title,
+      image: data.image || '',
+      description: data.description,
+      authorName: data.authorName || '',
+      authorEmail: data.authorEmail.toLowerCase(),
+      authorRole: data.authorRole || 'trainer',
+      likes: 0,
+      dislikes: 0,
+      commentCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    }
+
+    const result = await getCollection('forumPosts').insertOne(post)
+    res.status(201).json({ ...post, _id: result.insertedId })
+  } catch (err) {
+    console.error('Failed to create forum post:', err)
+    res.status(500).json({ error: 'Failed to create forum post' })
+  }
+})
+
+app.delete('/api/forum-posts/:id', authenticateJWT, authorizeRole('admin'), async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid post id' })
+    }
+
+    const postId = objectId.toString()
+    const result = await getCollection('forumPosts').deleteOne({ _id: objectId })
+
+    if (!result.deletedCount) {
+      return res.status(404).json({ error: 'Post not found' })
+    }
+
+    await Promise.all([
+      getCollection('forumComments').deleteMany({ postId }),
+      getCollection('forumVotes').deleteMany({ postId }),
+    ])
+    res.json({ deleted: true })
+  } catch (err) {
+    console.error('Failed to delete forum post:', err)
+    res.status(500).json({ error: 'Failed to delete forum post' })
+  }
+})
+
+app.get('/api/forum-posts/:id/comments', async (req, res) => {
+  try {
+    const postId = req.params.id
+    const comments = await getCollection('forumComments')
+      .find({ postId })
+      .sort({ createdAt: -1 })
+      .toArray()
+
+    res.json(comments)
+  } catch (err) {
+    console.error('Failed to fetch comments:', err)
+    res.status(500).json({ error: 'Failed to fetch comments' })
+  }
+})
+
+app.post('/api/forum-posts/:id/comments', authenticateJWT, checkNotBlocked, async (req, res) => {
+  try {
+    const data = req.body
+    const postObjectId = toObjectId(req.params.id)
+
+    if (!postObjectId) {
+      return res.status(400).json({ error: 'Invalid post id' })
+    }
+
+    if (!data?.text || !data?.authorEmail) {
+      return res.status(400).json({ error: 'Comment and author email are required' })
+    }
+
+    const comment = {
+      postId: req.params.id,
+      parentId: data.parentId || null,
+      text: data.text,
+      authorName: data.authorName || '',
+      authorEmail: data.authorEmail.toLowerCase(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
+
+    const result = await getCollection('forumComments').insertOne(comment)
+    await getCollection('forumPosts').updateOne(
+      { _id: postObjectId },
+      { $inc: { commentCount: 1 }, $set: { updatedAt: new Date() } },
+    )
+
+    res.status(201).json({ ...comment, _id: result.insertedId })
+  } catch (err) {
+    console.error('Failed to create comment:', err)
+    res.status(500).json({ error: 'Failed to create comment' })
+  }
+})
+
+app.patch('/api/forum-comments/:id', async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid comment id' })
+    }
+
+    if (!req.body?.text) {
+      return res.status(400).json({ error: 'Comment text is required' })
+    }
+
+    const result = await getCollection('forumComments').findOneAndUpdate(
+      { _id: objectId },
+      { $set: { text: req.body.text, updatedAt: new Date() } },
+      { returnDocument: 'after' },
+    )
+
+    if (!result) {
+      return res.status(404).json({ error: 'Comment not found' })
+    }
+
+    res.json(result)
+  } catch (err) {
+    console.error('Failed to update comment:', err)
+    res.status(500).json({ error: 'Failed to update comment' })
+  }
+})
+
+app.delete('/api/forum-comments/:id', async (req, res) => {
+  try {
+    const objectId = toObjectId(req.params.id)
+
+    if (!objectId) {
+      return res.status(400).json({ error: 'Invalid comment id' })
+    }
+
+    const comment = await getCollection('forumComments').findOneAndDelete({
+      _id: objectId,
+    })
+
+    if (!comment) {
+      return res.status(404).json({ error: 'Comment not found' })
+    }
+
+    const postObjectId = toObjectId(comment.postId)
+    if (postObjectId) {
+      await getCollection('forumPosts').updateOne(
+        { _id: postObjectId },
+        { $inc: { commentCount: -1 }, $set: { updatedAt: new Date() } },
+      )
+    }
+
+    res.json({ deleted: true })
+  } catch (err) {
+    console.error('Failed to delete comment:', err)
+    res.status(500).json({ error: 'Failed to delete comment' })
+  }
+})
+
+app.post('/api/forum-posts/:id/vote', async (req, res) => {
+  try {
+    const postObjectId = toObjectId(req.params.id)
+    const userEmail = req.body?.userEmail?.toLowerCase()
+    const voteType = req.body?.voteType
+
+    if (!postObjectId) {
+      return res.status(400).json({ error: 'Invalid post id' })
+    }
+
+    if (!userEmail || !['like', 'dislike'].includes(voteType)) {
+      return res.status(400).json({ error: 'User email and valid vote are required' })
+    }
+
+    const postId = req.params.id
+    const votesCollection = getCollection('forumVotes')
+    const existingVote = await votesCollection.findOne({ postId, userEmail })
+
+    if (existingVote?.voteType === voteType) {
+      return res.status(409).json({ error: `You already ${voteType}d this post` })
+    }
+
+    if (existingVote) {
+      await votesCollection.updateOne(
+        { _id: existingVote._id },
+        { $set: { voteType, updatedAt: new Date() } },
+      )
+      await getCollection('forumPosts').updateOne(
+        { _id: postObjectId },
+        {
+          $inc:
+            voteType === 'like'
+              ? { likes: 1, dislikes: -1 }
+              : { likes: -1, dislikes: 1 },
+        },
+      )
+    } else {
+      await votesCollection.insertOne({
+        postId,
+        userEmail,
+        voteType,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      })
+      await getCollection('forumPosts').updateOne(
+        { _id: postObjectId },
+        { $inc: voteType === 'like' ? { likes: 1 } : { dislikes: 1 } },
+      )
+    }
+
+    const post = await getCollection('forumPosts').findOne({ _id: postObjectId })
+    res.json(post)
+  } catch (err) {
+    console.error('Failed to vote on forum post:', err)
+    res.status(500).json({ error: 'Failed to vote on forum post' })
+  }
+})
 
 
 
