@@ -723,6 +723,95 @@ app.post('/api/bookings', authenticateJWT, checkNotBlocked, async (req, res) => 
   }
 })
 
+app.post('/api/create-checkout-session', authenticateJWT, async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ error: 'Stripe not configured on server' });
+  }
+
+  try {
+    const { classId, className, amount, trainerName, schedule } = req.body || {};
+
+    if (!classId || !className || !amount) {
+      return res.status(400).json({ error: 'classId, className and amount are required' });
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const successBase = process.env.CLIENT_URL || corsOptions.origin;
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [
+        {
+          price_data: {
+            currency: 'usd',
+            product_data: { name: className },
+            unit_amount: Math.round(numericAmount * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      customer_email: req.user?.email,
+      metadata: {
+        userEmail: req.user?.email || '',
+        userName: req.user?.name || '',
+        classId: String(classId),
+        className: className,
+        trainerName: trainerName || '',
+        schedule: schedule || '',
+      },
+      success_url: `${successBase}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${successBase}/payment/cancel?classId=${encodeURIComponent(classId)}`,
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('Failed to create checkout session:', err);
+    res.status(500).json({
+      error: 'Failed to create checkout session',
+      detail: err?.message || String(err),
+    });
+  }
+});
+
+// Complete checkout: verify session and create booking
+app.post('/api/complete-checkout', authenticateJWT, async (req, res) => {
+  if (!stripe) {
+    return res.status(500).json({ error: 'Stripe not configured on server' });
+  }
+
+  try {
+    const { sessionId } = req.body || {};
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'sessionId is required' });
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (!session) {
+      return res.status(404).json({ error: 'Checkout session not found' });
+    }
+
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ error: 'Payment not completed' });
+    }
+
+    const result = await createBookingFromStripeSession(session);
+    if (result.already) {
+      return res.json({ already: true });
+    }
+
+    res.status(201).json(result.booking);
+  } catch (err) {
+    console.error('Failed to complete checkout:', err);
+    res.status(500).json({ error: 'Failed to complete checkout' });
+  }
+});
 
 
 
