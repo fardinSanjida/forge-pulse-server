@@ -65,6 +65,58 @@ function generateToken(user) {
   return jwt.sign(payload, secret, { expiresIn: '7d' });
 }
 
+async function createBookingFromStripeSession(session) {
+  const metadata = session.metadata || {};
+  const userEmail = String(metadata.userEmail || session.customer_details?.email || '').toLowerCase();
+  const classId = metadata.classId || '';
+
+  if (!userEmail || !classId) {
+    throw new Error('Missing required Stripe metadata for booking');
+  }
+
+  const existing = await getCollection('bookings').findOne({ userEmail, classId });
+  if (existing) {
+    return { already: true, existing };
+  }
+
+  const booking = {
+    userName: metadata.userName || session.customer_details?.name || '',
+    userEmail,
+    classId,
+    className: metadata.className || '',
+    trainerName: metadata.trainerName || '',
+    schedule: metadata.schedule || '',
+    amount: Number(session.amount_total || 0) / 100,
+    transactionId: session.payment_intent || session.id,
+    createdAt: new Date(),
+  };
+
+  const result = await getCollection('bookings').insertOne(booking);
+
+  if (ObjectId.isValid(classId)) {
+    await getCollection('classes').updateOne(
+      { _id: new ObjectId(classId) },
+      { $inc: { bookingCount: 1 }, $set: { updatedAt: new Date() } },
+    );
+  }
+
+  return { booking: { ...booking, _id: result.insertedId } };
+}
+
+function generateToken(user) {
+  const payload = {
+    email: user.email,
+    role: user.role || 'user',
+  };
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('Missing JWT_SECRET in environment');
+  }
+
+  return jwt.sign(payload, secret, { expiresIn: '7d' });
+}
+
 function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization || req.headers.Authorization;
   let token = null;
@@ -670,6 +722,9 @@ app.post('/api/bookings', authenticateJWT, checkNotBlocked, async (req, res) => 
     res.status(500).json({ error: 'Failed to save booking' })
   }
 })
+
+
+
 
 
 
